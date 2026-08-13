@@ -62,7 +62,7 @@ for sat in all_records:
     }
 
     for field_name, field_value in field_map.items():
-        if field_value:
+    if field_value and str(field_value).strip().lower() != "none":
             cur.execute("""
                 INSERT INTO metadata (object_id, source_id, field_name, field_value)
                 VALUES (%s, %s, %s, %s);
