@@ -88,3 +88,15 @@ CREATE TABLE identifiers (
     external_id    TEXT NOT NULL,
     UNIQUE (source_id, external_id)
 );
+-- =========================================================
+-- 8. resolved_metadata — one winning value per object+field,
+--    computed by conflict resolution logic (never edited by hand)
+-- =========================================================
+CREATE TABLE resolved_metadata (
+    object_id     INTEGER NOT NULL REFERENCES objects(object_id),
+    field_name    TEXT NOT NULL,
+    field_value   TEXT NOT NULL,
+    source_id     INTEGER NOT NULL REFERENCES sources(source_id),
+    resolved_at   TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (object_id, field_name)
+);
