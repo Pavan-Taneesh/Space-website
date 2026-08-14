@@ -1,0 +1,118 @@
+"""
+SGP4 propagation: given an object's latest orbital_elements row,
+compute position/velocity/altitude at a requested UTC datetime.
+
+Usage (standalone test):
+    python logic/propagate.py <object_id>
+"""
+
+import sys
+import math
+from datetime import datetime, timezone
+
+import psycopg2
+
+from sgp4.api import Satrec, WGS72
+from sgp4.api import jday
+
+
+def get_latest_elements(object_id: int):
+    """Pull the latest (non-stale-aware) orbital_elements row for one object."""
+    conn = psycopg2.connect(
+        host="localhost",
+        dbname="project_db",
+        user="postgres",
+        password="pavan@2805",
+    )
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT epoch, mean_motion, eccentricity, inclination,
+               ra_of_asc_node, arg_of_pericenter, mean_anomaly,
+               bstar, mean_motion_dot, mean_motion_ddot
+        FROM orbital_elements
+        WHERE object_id = %s
+        ORDER BY fetched_at DESC
+        LIMIT 1;
+        """,
+        (object_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        raise ValueError(f"No orbital_elements found for object_id={object_id}")
+    return row
+
+
+def build_satellite(row):
+    """Convert DB row (raw TLE units) into an initialized Satrec object."""
+    (epoch, mean_motion, eccentricity, inclination,
+     raan, argp, mean_anomaly, bstar, mm_dot, mm_ddot) = row
+
+    # unit conversions: degrees -> radians
+    inclo = math.radians(inclination)
+    nodeo = math.radians(raan)
+    argpo = math.radians(argp)
+    mo = math.radians(mean_anomaly)
+
+    # mean motion: revs/day -> radians/minute
+    no_kozai = mean_motion * (2 * math.pi) / 1440.0
+
+    # epoch -> Julian day / fraction (sgp4init wants epoch as days since 1949 Dec 31 00:00 UTC)
+    jd, fr = jday(epoch.year, epoch.month, epoch.day,
+                  epoch.hour, epoch.minute, epoch.second + epoch.microsecond / 1e6)
+    epoch_sgp4 = (jd + fr) - 2433281.5  # sgp4 epoch reference point
+
+    sat = Satrec()
+    sat.sgp4init(
+        WGS72,            # gravity model
+        'i',               # 'i' = improved mode (standard for sgp4init)
+        0,                 # satnum placeholder (not used for propagation itself)
+        epoch_sgp4,
+        bstar,
+        mm_dot,
+        mm_ddot,
+        eccentricity,
+        argpo,
+        inclo,
+        mo,
+        no_kozai,
+        nodeo,
+    )
+    return sat
+
+
+def propagate(sat: Satrec, when: datetime):
+    """Propagate to a given UTC datetime. Returns (position_km, velocity_km_s, altitude_km)."""
+    jd, fr = jday(when.year, when.month, when.day,
+                  when.hour, when.minute, when.second + when.microsecond / 1e6)
+    error, position, velocity = sat.sgp4(jd, fr)
+    if error != 0:
+        raise RuntimeError(f"SGP4 propagation error code {error}")
+
+    # altitude approx: distance from Earth's center minus mean Earth radius
+    earth_radius_km = 6371.0
+    r = math.sqrt(sum(c ** 2 for c in position))
+    altitude_km = r - earth_radius_km
+
+    return position, velocity, altitude_km
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python logic/propagate.py <object_id>")
+        sys.exit(1)
+
+    object_id = int(sys.argv[1])
+    row = get_latest_elements(object_id)
+    sat = build_satellite(row)
+
+    now = datetime.now(timezone.utc)
+    position, velocity, altitude_km = propagate(sat, now)
+
+    print(f"object_id: {object_id}")
+    print(f"time (UTC): {now.isoformat()}")
+    print(f"position (km, ECI): {position}")
+    print(f"velocity (km/s, ECI): {velocity}")
+    print(f"altitude (km): {altitude_km:.2f}")
